@@ -3,7 +3,6 @@
 #include <Adafruit_Sensor.h>
 #include "Adafruit_BME680.h"
 #include <Arduino.h>
-#include <time.h>
 #include <Adafruit_ST7789.h>
 
 #define BME_SCK 13
