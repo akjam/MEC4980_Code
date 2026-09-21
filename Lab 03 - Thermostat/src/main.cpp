@@ -2,6 +2,9 @@
 #include <SPI.h>
 #include <Adafruit_Sensor.h>
 #include "Adafruit_BME680.h"
+#include <Arduino.h>
+#include <time.h>
+#include <Adafruit_ST7789.h>
 
 #define BME_SCK 13
 #define BME_MISO 12
@@ -61,15 +64,26 @@ Adafruit_BME680 bme(&Wire); // I2C
 //Adafruit_BME680 bme(BME_CS); // hardware SPI
 //Adafruit_BME680 bme(BME_CS, BME_MOSI, BME_MISO, BME_SCK);
 
+Adafruit_ST7789 display = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
+GFXcanvas16 canvas(240, 135);
+
 void setup() {
-  Serial.begin(9600);
-  while (!Serial);
-  Serial.println(F("BME680 test"));
+  //Serial.begin(9600);
+  //while (!Serial);
+  //canvas.println(F("BME680 test"));
+  //Serial.println(F("BME680 test"));
 
   if (!bme.begin()) {
-    Serial.println(F("Could not find a valid BME680 sensor, check wiring!"));
+    canvas.println(F("Could not find a valid BME680 sensor, check wiring!"));
+    //Serial.println(F("Could not find a valid BME680 sensor, check wiring!"));
+    display.drawRGBBitmap(0,0, canvas.getBuffer(), 240, 135);
     while (1);
   }
+
+  pinMode(TFT_BACKLITE, OUTPUT);
+  digitalWrite(TFT_BACKLITE, 1);
+  display.init(135, 240);
+  display.setRotation(3);
 
   pinMode(1, INPUT_PULLDOWN);
   attachInterrupt(digitalPinToInterrupt(1), buttonToChangeThings, RISING);
@@ -93,12 +107,14 @@ void loop() {
   // Tell BME680 to begin measurement.
   unsigned long endTime = bme.beginReading();
   if (endTime == 0) {
-    Serial.println(F("Failed to begin reading :("));
+    canvas.println(F("Failed to begin reading :("));
+    //Serial.println(F("Failed to begin reading :("));
     return;
   }
 
   if (!bme.endReading()) {
-    Serial.println(F("Failed to complete reading :("));
+    canvas.println(F("Failed to complete reading :("));
+    //Serial.println(F("Failed to complete reading :("));
     return;
   }
 
@@ -124,11 +140,15 @@ void loop() {
     }    
     changeButtonFlag = false; 
   }
-
+  canvas.fillScreen(ST77XX_BLACK);
+  canvas.setCursor(0,0);
+  canvas.setTextSize(2);
   if (opMode == Heating) {
     if (currentTempC < targetTempC) {
       digitalWrite(LED_YELLOW, HIGH);
-      Serial.println("Heat is on now!");
+      canvas.setTextColor(ST77XX_ORANGE);
+      canvas.println("Heat is on now!");
+      //Serial.println("Heat is on now!");
     } else {
       digitalWrite(LED_YELLOW, LOW);
       digitalWrite(LED_BLUE, LOW);
@@ -136,35 +156,53 @@ void loop() {
   } else if (opMode == Cooling) {
     if (currentTempC > targetTempC) {
       digitalWrite(LED_BLUE, HIGH);
-      Serial.println("AC is on now!");
+      canvas.setTextColor(ST77XX_BLUE);
+      canvas.println("AC is on now!");
+      //Serial.println("AC is on now!");
     } else {
       digitalWrite(LED_YELLOW, LOW);
       digitalWrite(LED_BLUE, LOW);
     }
   }
 
+  canvas.setTextColor(ST77XX_WHITE);
   if (unitMode == F) {
     float currentTempF = (currentTempC * 9 / 5) + 32;
     float targetTempF = (targetTempC * 9 / 5) + 32;
-    Serial.print(("Temperature = "));
+    canvas.print(("Temperature: "));
+    canvas.print(currentTempF);
+    canvas.println("*F");
+    canvas.print("Target: ");
+    canvas.print(targetTempF);
+    canvas.println("*F");
+    /*Serial.print(("Temperature = "));
     Serial.print(currentTempF);
     Serial.println(" *F");
     Serial.print(" with target ");
-    Serial.println(targetTempF);
+    Serial.println(targetTempF);*/
   } else if (unitMode == C) {
-    Serial.print(("Temperature = "));
+    canvas.print(("Temperature: "));
+    canvas.print(currentTempC);
+    canvas.println("*C");
+    canvas.print("Target: ");
+    canvas.print(targetTempC);
+    canvas.println("*C");
+    /*Serial.print(("Temperature = "));
     Serial.print(currentTempC);
     Serial.println(" *C");
     Serial.print(" with target ");
-    Serial.println(targetTempC);
+    Serial.println(targetTempC);*/
   }
 
-  Serial.print(" operating in mode ");
+  canvas.print("Operation Mode: ");
+  canvas.println((int)opMode);
+  canvas.print("Menu #: ");
+  canvas.println(menuMode);
+  /*Serial.print(" operating in mode ");
   Serial.println((int)opMode);
   Serial.print(" in menu ");
-  Serial.println(menuMode);
-  
+  Serial.println(menuMode);*/
+  display.drawRGBBitmap(0,0, canvas.getBuffer(), 240, 135);
 
-  Serial.println();
   delay(100);
 }
