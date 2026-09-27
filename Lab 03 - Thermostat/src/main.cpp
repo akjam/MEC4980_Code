@@ -85,9 +85,9 @@ void setup() {
   display.setRotation(3);
 
   pinMode(1, INPUT_PULLDOWN);
-  attachInterrupt(digitalPinToInterrupt(1), buttonToChangeThings, RISING);
+  attachInterrupt(digitalPinToInterrupt(1), buttonToChangeThings, RISING); // Detects if button was pressed
   pinMode(2, INPUT_PULLDOWN);
-  attachInterrupt(digitalPinToInterrupt(2), buttonToChangeMenu, RISING);
+  attachInterrupt(digitalPinToInterrupt(2), buttonToChangeMenu, RISING); //detects if button was pressed
 
   pinMode(LED_YELLOW, OUTPUT);
   pinMode(LED_BLUE, OUTPUT);
