@@ -1,0 +1,18 @@
+{
+	"folders": [
+		{
+			"path": "HW 01 - Pedometer"
+		},
+		{
+			"path": "Lab 03 - Thermostat"
+		},
+		{
+			"path": "Lab 04 - Visual Level"
+		},
+		{
+			"name": "HW 02 - Encoder and PID",
+			"path": "HW 02 - Encoder and PID"
+		}
+	],
+	"settings": {}
+}
