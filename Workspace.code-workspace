@@ -12,6 +12,10 @@
 		{
 			"name": "HW 02 - Encoder and PID",
 			"path": "HW 02 - Encoder and PID"
+		},
+		{
+			"name": "Week 06 - Factory Sorting Line",
+			"path": "Week 06 - Factory Sorting Line"
 		}
 	],
 	"settings": {}
