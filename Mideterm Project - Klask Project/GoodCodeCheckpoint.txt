@@ -1,0 +1,289 @@
+#include <Arduino.h>
+#include <AccelStepper.h>
+#include <math.h>
+
+// =========================================================================
+// QUICK TOGGLES
+// =========================================================================
+// Set to true when testing upside down on the floor.
+// Change to false when mounted under the Klask table.
+bool isUpsideDown = false;
+
+// Set to true to enable the forward flick slam macro, or false to turn it off.
+bool enableSlamMacro = false;
+
+// =========================================================================
+// 1. SLAM MACRO PARAMETERS (EASILY TUNABLE)
+// =========================================================================
+float slamDistance       = 2.0f;    // Inches to punch forward during a slam
+float slamSpeed          = 3000.0f; // Lowered for higher torque under friction
+float slamAccel          = 8000.0f; // Lowered so slam does not skip steps
+int   slamFlickDeltaY    = 60;      // Jump in yValue within 30ms needed to trigger
+int   slamMinY           = 75;      // Minimum joystick position required (0 to 100)
+unsigned long slamCooldownMs = 500; // Minimum time between slams in milliseconds
+
+// =========================================================================
+// 2. DIGITAL HARDSTOP & SINGULARITY PARAMETERS (EASILY TUNABLE)
+// =========================================================================
+// Changed from -0.92 to -0.82 so the arms stop before entering the flat,
+// low-leverage zone where magnet friction stalls the motors.
+float collinearCosThreshold = -0.96f; 
+
+float armReachMargin   = 0.08f;  // Inches backed off from physical lockup/fold
+float maxJointAngleCos = 0.995f;  // Mathematical safety clamp for acos()
+
+// Physical board walls (in inches)
+float fieldMinX = -4.5;
+float fieldMaxX =  4.5f;
+float fieldMinY = -3.0f;
+float fieldMaxY =  7.5f;
+
+// =========================================================================
+// 3. MOTION & HIGH-TORQUE FRICTION PARAMETERS
+// =========================================================================
+// Lowered speed and acceleration to maximize motor pushing torque against friction
+float normalSpeed   = 12000.0f;  
+float normalAccel   = 18000.0f;  
+float moveStep      = 0.18f;    // Base inches moved per 30ms update
+
+// When pinned against the ceiling hardstop, these control how aggressively
+// the code drops Y to allow continuous left/right movement along the arch.
+float contourDropStep   = 0.05f; // Inches of Y to yield per search attempt
+int   contourMaxTries   = 14;    // Up to 14 attempts
+
+// =========================================================================
+// 4. HARDWARE & LINKAGE SETUP
+// =========================================================================
+int pinRx = 38;
+int pinTx = 39;
+int pinStepLeft = 9;
+int pinDirLeft = 10;
+int pinStepRight = 6;
+int pinDirRight = 5;
+
+long rateToPc = 115200;
+long rateToBoard = 9600;
+
+float link1 = 5.50f;
+float link2 = 7.65f;
+float leftMotorX = -7.18f;
+float rightMotorX = 7.18f;
+
+float stepsPerDegree = 3200.0f / 360.0f; // 1/16 microstepping
+
+float currentX = 0.00f;
+float currentY = -0.50f;
+float homeAngleLeft = 68.96f;
+float homeAngleRight = 111.04f;
+
+int xValue = 0;
+int yValue = 0;
+int previousY = 0;
+unsigned long lastSlamTime = 0;
+
+String boardbuffer = "";
+
+AccelStepper stepperLeft(AccelStepper::DRIVER, pinStepLeft, pinDirLeft);
+AccelStepper stepperRight(AccelStepper::DRIVER, pinStepRight, pinDirRight);
+
+// Inverse Kinematics with Digital Hardstop Protection
+bool CalculateIK(float x, float y, float &outLeftSteps, float &outRightSteps) {
+  // Left Arm
+  float dxl = x - leftMotorX;
+  float dyl = y;
+  float cl = sqrtf(dxl * dxl + dyl * dyl);
+
+  if (cl > (link1 + link2 - armReachMargin) || cl < (fabs(link2 - link1) + armReachMargin)) {
+    return false;
+  }
+
+  float cosBetaL = (link1 * link1 + cl * cl - link2 * link2) / (2.0f * link1 * cl);
+  if (cosBetaL < -maxJointAngleCos || cosBetaL > maxJointAngleCos) return false;
+  float betaL = acosf(cosBetaL);
+  float alphaL = atan2f(dyl, dxl);
+  float thetaL = alphaL + betaL;
+
+  // Right Arm
+  float dxr = x - rightMotorX;
+  float dyr = y;
+  float cr = sqrtf(dxr * dxr + dyr * dyr);
+
+  if (cr > (link1 + link2 - armReachMargin) || cr < (fabs(link2 - link1) + armReachMargin)) {
+    return false;
+  }
+
+  float cosBetaR = (link1 * link1 + cr * cr - link2 * link2) / (2.0f * link1 * cr);
+  if (cosBetaR < -maxJointAngleCos || cosBetaR > maxJointAngleCos) return false;
+  float betaR = acosf(cosBetaR);
+  float alphaR = atan2f(dyr, dxr);
+  if (alphaR < 0.0f) {
+    alphaR += 2.0f * PI;
+  }
+  float thetaR = alphaR - betaR;
+
+  // Collinear L2 Singularity Digital Hardstop
+  float leftElbowX = leftMotorX + link1 * cosf(thetaL);
+  float leftElbowY = link1 * sinf(thetaL);
+  float rightElbowX = rightMotorX + link1 * cosf(thetaR);
+  float rightElbowY = link1 * sinf(thetaR);
+
+  float vLx = leftElbowX - x;
+  float vLy = leftElbowY - y;
+  float vRx = rightElbowX - x;
+  float vRy = rightElbowY - y;
+
+  float dot = vLx * vRx + vLy * vRy;
+  float cosGamma = dot / (link2 * link2);
+
+  // Trigger hardstop if forearms are flattening toward a straight line
+  if (cosGamma <= collinearCosThreshold) {
+    return false;
+  }
+
+  float leftDeg = thetaL * (180.0f / PI);
+  float rightDeg = thetaR * (180.0f / PI);
+
+  outLeftSteps = roundf((leftDeg - homeAngleLeft) * stepsPerDegree);
+  outRightSteps = roundf((rightDeg - homeAngleRight) * stepsPerDegree);
+  return true;
+}
+
+// Executes an aggressive forward slam; automatically adjusts distance if near hardstop
+void TriggerSlamMacro() {
+  float targetLeftSteps = 0.0f;
+  float targetRightSteps = 0.0f;
+  float actualSlamY = currentY;
+
+  for (float d = slamDistance; d >= 0.20f; d -= 0.10f) {
+    float testY = constrain(currentY + d, fieldMinY, fieldMaxY);
+    if (CalculateIK(currentX, testY, targetLeftSteps, targetRightSteps)) {
+      actualSlamY = testY;
+      break;
+    }
+  }
+
+  if (actualSlamY > currentY) {
+    stepperLeft.setMaxSpeed(slamSpeed);
+    stepperLeft.setAcceleration(slamAccel);
+    stepperRight.setMaxSpeed(slamSpeed);
+    stepperRight.setAcceleration(slamAccel);
+
+    stepperLeft.moveTo(targetLeftSteps);
+    stepperRight.moveTo(targetRightSteps);
+
+    while (stepperLeft.distanceToGo() != 0 || stepperRight.distanceToGo() != 0) {
+      stepperLeft.run();
+      stepperRight.run();
+    }
+
+    stepperLeft.setMaxSpeed(normalSpeed);
+    stepperLeft.setAcceleration(normalAccel);
+    stepperRight.setMaxSpeed(normalSpeed);
+    stepperRight.setAcceleration(normalAccel);
+
+    currentY = actualSlamY;
+  }
+}
+
+void setup() {
+  Serial.begin(rateToPc);
+  Serial1.setPins(pinRx, pinTx);
+  Serial1.begin(rateToBoard);
+
+  stepperLeft.setMaxSpeed(normalSpeed);
+  stepperLeft.setAcceleration(normalAccel);
+  stepperRight.setMaxSpeed(normalSpeed);
+  stepperRight.setAcceleration(normalAccel);
+}
+
+void RunSecondBoardLoop() {
+  while (Serial1.available()) {
+    char c = Serial1.read();
+    if (c == '\n') {
+      boardbuffer.trim();
+      if (boardbuffer.length() > 0) {
+        int comma1 = boardbuffer.indexOf(',');
+        int comma2 = boardbuffer.lastIndexOf(',');
+        xValue = boardbuffer.substring(comma1 + 1, comma2).toInt();
+        yValue = boardbuffer.substring(comma2 + 1).toInt();
+
+        // Check for forward flick gesture only if the slam macro is enabled
+        int deltaY = yValue - previousY;
+        if (enableSlamMacro && deltaY >= slamFlickDeltaY && yValue >= slamMinY && (millis() - lastSlamTime > slamCooldownMs)) {
+          TriggerSlamMacro();
+          lastSlamTime = millis();
+        }
+        previousY = yValue;
+
+        if (isUpsideDown) {
+          xValue = -xValue;
+        }
+
+        // Automatically take smaller, higher-torque steps when extended forward
+        // where the linkage arms have less mechanical leverage
+        float leverageScale = 1.0f;
+        if (currentY > 1.50f) {
+          leverageScale = constrain(1.0f - ((currentY - 1.50f) * 0.15f), 0.40f, 1.0f);
+        }
+        float activeStep = moveStep * leverageScale;
+
+        float nextX = constrain(currentX + (xValue / 100.0f) * activeStep, fieldMinX, fieldMaxX);
+        float nextY = constrain(currentY + (yValue / 100.0f) * activeStep, fieldMinY, fieldMaxY);
+
+        float targetLeftSteps = 0.0f;
+        float targetRightSteps = 0.0f;
+        bool moved = false;
+
+        // 1. Try full requested move
+        if (CalculateIK(nextX, nextY, targetLeftSteps, targetRightSteps)) {
+          currentX = nextX;
+          currentY = nextY;
+          stepperLeft.moveTo(targetLeftSteps);
+          stepperRight.moveTo(targetRightSteps);
+          moved = true;
+        } 
+        // 2. Try pure horizontal move
+        else if (CalculateIK(nextX, currentY, targetLeftSteps, targetRightSteps)) {
+          currentX = nextX;
+          stepperLeft.moveTo(targetLeftSteps);
+          stepperRight.moveTo(targetRightSteps);
+          moved = true;
+        } 
+        // 3. ARCH CONTOURING (Prevents stall at the hardstop):
+        else if (xValue != 0) {
+          float contourY = currentY;
+          float stepDirY = (currentY > 1.0f) ? -contourDropStep : contourDropStep;
+          for (int attempt = 1; attempt <= contourMaxTries; attempt++) {
+            contourY += stepDirY;
+            if (CalculateIK(nextX, contourY, targetLeftSteps, targetRightSteps)) {
+              currentX = nextX;
+              currentY = contourY;
+              stepperLeft.moveTo(targetLeftSteps);
+              stepperRight.moveTo(targetRightSteps);
+              moved = true;
+              break;
+            }
+          }
+        }
+
+        // 4. Pure vertical move (if horizontal is blocked by wall)
+        if (!moved && CalculateIK(currentX, nextY, targetLeftSteps, targetRightSteps)) {
+          currentY = nextY;
+          stepperLeft.moveTo(targetLeftSteps);
+          stepperRight.moveTo(targetRightSteps);
+          moved = true;
+        }
+      }
+      boardbuffer = "";
+    } else if (c != '\r') {
+      boardbuffer += c;
+    }
+  }
+
+  stepperLeft.run();
+  stepperRight.run();
+}
+
+void loop() {
+  RunSecondBoardLoop();
+}
